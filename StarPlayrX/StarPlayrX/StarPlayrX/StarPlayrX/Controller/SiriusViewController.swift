@@ -187,12 +187,12 @@ class SiriusViewController: UITableViewController {
         ps.updatePDT() { success in
             if success {
 
-                if ps.player.isBusy {
+                //if ps.player.isBusy {
                     if let i = gs.ChannelArray.firstIndex(where: {$0.channel == gs.currentChannel}) {
                         let item = gs.ChannelArray[i].largeChannelArtUrl
                         ps.updateDisplay(key: gs.currentChannel, cache: ps.pdtCache, channelArt: item)
                     }
-                }
+                //}
                 
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: .updateChannelsView, object: nil)
