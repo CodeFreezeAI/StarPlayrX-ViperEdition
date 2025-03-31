@@ -386,9 +386,6 @@ class LoginViewController: UIViewController {
         }
         
         guard let channelList = g.ChannelList else { runFailure(); return }
-        
-        //g.ChannelList = nil
-        
         g.ChannelArray = tableData()
         
         let sortedChannelList = Array(channelList.keys).sorted {$0.localizedStandardCompare($1) == .orderedAscending}
@@ -451,6 +448,7 @@ class LoginViewController: UIViewController {
     func processChannelIcons()  {
         // if !g.ChannelArray.isEmpty && !(g.ChannelData?.isEmpty ?? true) {
         for i in 0..<g.ChannelArray.count {
+            print(g.ChannelArray[0])
             let channel = g.ChannelArray[i].channel
             if let chArt = g.ChannelData?[channel], let img = UIImage(data: chArt) {
                 g.ChannelArray[i].channelImage = img

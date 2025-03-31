@@ -42,6 +42,7 @@ final class Player {
     }
     
     func spx(_ state: PlayerState?) {
+        
         if state == .stream {
             if isMacCatalystApp {
                 self.resetPlayer()

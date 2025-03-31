@@ -244,6 +244,7 @@ class ChannelsViewController: UITableViewController,UISearchBarDelegate {
 
         let previousChannel = g.currentChannel
         
+        
         g.currentChannelName = text
         g.currentChannel = channel
         g.SelectedRow = indexPath
@@ -272,9 +273,24 @@ class ChannelsViewController: UITableViewController,UISearchBarDelegate {
         }
         
         DispatchQueue.main.async {
+            //print(self.g.currentChannel)
+            let channel = self.g.ChannelList?[self.g.currentChannel] as? [String: Any]
+            let channelId = channel?["channelId"] as? String ?? "siriushits1"
+            self.sessionCVC(channelId: channelId)
+
             let doit = self.g.currentChannel != previousChannel || self.p.player.isDead || self.p.state != .playing
             doit ? self.p.new(.stream) : () //playing
             doit || !iPad ? self.performSegue(withIdentifier: "playerViewSegue", sender: cell) : ()
+        }
+    }
+    
+    func sessionCVC(channelId: String) {
+        let endpoint = g.insecure + Global.obj.local + ":" + String(p.port) + "/api/v3/session"
+        let method = "cookies"
+        let request = ["channelid": channelId] as Dictionary
+        
+        Async.api.Post(request: request, endpoint: endpoint, method: method) { _ in
+            
         }
     }
     

@@ -41,8 +41,8 @@ func playlistRoute() -> dispatchHttpReq {
                     tokenExpires = currentTimeInMiliseconds()
                 }
                 
-                // Refresh token every 480 seconds
-                if (currentTimeInMiliseconds() - tokenExpires) >= 480000 {
+                // Refresh token every 240 seconds
+                if (currentTimeInMiliseconds() - tokenExpires) >= 480000 / 2 {
                     DispatchQueue.main.async {
                         Session(channelid: channelid, updateToken: true, updateUser: false)
                     }

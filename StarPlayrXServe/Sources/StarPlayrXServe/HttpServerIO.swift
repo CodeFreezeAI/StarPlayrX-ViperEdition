@@ -181,7 +181,13 @@ open class HttpServerIO {
             case .ready:
                 print("Connection ready")
             case .failed(let error):
-                print("Connection failed: \(error)")
+                // Check for ECONNRESET (Connection reset by peer - error code 54)
+                if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                    print("Connection reset by peer - client disconnected")
+                } else {
+                    print("Connection failed: \(error)")
+                }
+                
                 connection.cancel()
                 
                 // Remove from connections array
@@ -208,7 +214,12 @@ open class HttpServerIO {
             // Use a larger buffer size to accommodate JSON payloads
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1024 * 1024) { [weak self] content, contentContext, isComplete, error in
                 if let error = error {
-                    print("Receive error: \(error)")
+                    // Check for ECONNRESET (Connection reset by peer - error code 54)
+                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                        print("Connection reset by peer while receiving - client disconnected")
+                    } else {
+                        print("Receive error: \(error)")
+                    }
                     connection.cancel()
                     return
                 }
@@ -234,9 +245,20 @@ open class HttpServerIO {
                             let keepConnection = isStreamRequest ? true : parser.supportsKeepAlive(request.headers)
                             
                             // Respond to the client
-                            _ = try self?.respond(connection, response: response, keepAlive: keepConnection, isStreamRequest: isStreamRequest)
-                            
-                            if !keepConnection {
+                            do {
+                                _ = try self?.respond(connection, response: response, keepAlive: keepConnection, isStreamRequest: isStreamRequest)
+                                
+                                if !keepConnection {
+                                    connection.cancel()
+                                    return
+                                }
+                            } catch {
+                                // Handle response errors
+                                if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                                    print("Connection reset by peer during response - client disconnected")
+                                } else {
+                                    print("Response error: \(error)")
+                                }
                                 connection.cancel()
                                 return
                             }
@@ -261,7 +283,7 @@ open class HttpServerIO {
     }
     
     private func respond(_ connection: NWConnection, response: HttpResponse, keepAlive: Bool, isStreamRequest: Bool = false) throws -> Bool {
-        autoreleasepool {
+        try autoreleasepool {
             var responseHeader = "HTTP/1.1 \(response.statusCode) \(response.reasonPhrase)\r\n"
             
             let content = response.content()
@@ -269,6 +291,7 @@ open class HttpServerIO {
             
             if keepAlive {
                 responseHeader.append("Connection: keep-alive\r\n")
+                responseHeader.append("Keep-Alive: timeout=60\r\n") // Add timeout directive
             } else {
                 responseHeader.append("Connection: close\r\n")
             }
@@ -288,11 +311,17 @@ open class HttpServerIO {
             
             // Use a semaphore to wait for the header send to complete
             let headerSent = DispatchSemaphore(value: 0)
+            var headerError: Error?
             
             // Send headers
             connection.send(content: responseHeader.data(using: .utf8)!, completion: .contentProcessed { error in
                 if let error = error {
-                    print("Header write error: \(error)")
+                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                        print("Connection reset by peer while sending headers - client disconnected")
+                    } else {
+                        print("Header write error: \(error)")
+                    }
+                    headerError = error
                 }
                 headerSent.signal()
             })
@@ -300,12 +329,24 @@ open class HttpServerIO {
             // Wait for header to be sent
             headerSent.wait()
             
+            // If we got an error sending the header, throw it
+            if let error = headerError {
+                throw error
+            }
+            
             // Send body if it exists
             if let writeClosure = content.write {
                 // Use a semaphore to wait for the body send to complete
                 let bodySent = DispatchSemaphore(value: 0)
+                var bodyError: Error?
                 
-                let context = SignalingInnerWriteContext(connection: connection, completionSemaphore: bodySent)
+                let context = SignalingInnerWriteContext(
+                    connection: connection,
+                    completionSemaphore: bodySent,
+                    onError: { error in
+                        bodyError = error
+                    }
+                )
                 
                 do {
                     try writeClosure(context)
@@ -317,18 +358,35 @@ open class HttpServerIO {
                 
                 // Wait for body to be sent
                 bodySent.wait()
+                
+                // If we got an error sending the body, throw it
+                if let error = bodyError {
+                    throw error
+                }
             }
             
             // For non-keep-alive connections, we need to flush and close
             if !keepAlive {
                 let flushSemaphore = DispatchSemaphore(value: 0)
+                var flushError: Error?
+                
                 connection.send(content: Data(), completion: NWConnection.SendCompletion.contentProcessed { error in
                     if let error = error {
-                        print("Flush error: \(error)")
+                        if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                            print("Connection reset by peer during flush - client disconnected")
+                        } else {
+                            print("Flush error: \(error)")
+                        }
+                        flushError = error
                     }
                     flushSemaphore.signal()
                 })
                 flushSemaphore.wait()
+                
+                // If we got an error during flush, throw it
+                if let error = flushError {
+                    throw error
+                }
             }
             
             // For stream requests, a slightly longer delay helps maintain the connection
@@ -345,13 +403,26 @@ open class HttpServerIO {
     private struct SignalingInnerWriteContext: HttpResponseBodyWriter {
         let connection: NWConnection
         let completionSemaphore: DispatchSemaphore
+        let onError: ((Error) -> Void)?
+        
+        init(connection: NWConnection, completionSemaphore: DispatchSemaphore, onError: ((Error) -> Void)? = nil) {
+            self.connection = connection
+            self.completionSemaphore = completionSemaphore
+            self.onError = onError
+        }
         
         func write(byts data: [UInt8]) throws {
             let dataSent = DispatchSemaphore(value: 0)
             
             connection.send(content: Data(data), completion: .contentProcessed { error in
                 if let error = error {
-                    print("Write error: \(error)")
+                    // Check for specific error: Connection reset by peer (54)
+                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                        print("Connection reset by peer - client likely disconnected")
+                    } else {
+                        print("Write error: \(error)")
+                    }
+                    onError?(error)
                 }
                 dataSent.signal()
             })
@@ -365,7 +436,13 @@ open class HttpServerIO {
             
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
-                    print("Write error: \(error)")
+                    // Check for specific error: Connection reset by peer (54)
+                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                        print("Connection reset by peer - client likely disconnected")
+                    } else {
+                        print("Write error: \(error)")
+                    }
+                    onError?(error)
                 }
                 dataSent.signal()
             })

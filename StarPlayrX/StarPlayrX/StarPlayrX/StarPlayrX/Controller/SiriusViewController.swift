@@ -11,7 +11,7 @@ import AVKit
 
 class SiriusViewController: UITableViewController {
     var pdtTimer:    Timer? = nil
-    var streamTimer: Timer? = nil
+    //var streamTimer: Timer? = nil
 
     let g = Global.obj
     let p = Player.shared
@@ -19,13 +19,13 @@ class SiriusViewController: UITableViewController {
     override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .bottom }
     override var prefersHomeIndicatorAutoHidden : Bool { true }
     
-    func checkServer() {
-        let pinpoint = "\(g.insecure)\(g.localhost):\(p.port)/api/v3/ping"
-        Async.api.Text(endpoint: pinpoint) { pong in
-            guard let ping = pong else { self.launchServer(); return }
-            ping == "pong" ? () /* do nothing */ : self.launchServer()
-        }
-    }
+//    func checkServer() {
+//        let pinpoint = "\(g.insecure)\(g.localhost):\(p.port)/api/v3/ping"
+//        Async.api.Text(endpoint: pinpoint) { pong in
+//            guard let ping = pong else { self.launchServer(); return }
+//            ping == "pong" ? () /* do nothing */ : self.launchServer()
+//        }
+//    }
     
     func launchServer() {
         p.autoLaunchServer(){ success in
@@ -35,14 +35,14 @@ class SiriusViewController: UITableViewController {
         }
     }
     
-    @objc func AppEnteredForeground(_ notification: Notification) {
-        checkServer()
-    }
+//    @objc func AppEnteredForeground(_ notification: Notification) {
+//        checkServer()
+//    }
     
     override func viewDidLoad() {
         super.viewDidLoad()
         
-        NotificationCenter.default.addObserver(self, selector: #selector(AppEnteredForeground(_:)), name: Notification.Name.willEnterForegroundNotification, object: nil)
+//        NotificationCenter.default.addObserver(self, selector: #selector(AppEnteredForeground(_:)), name: Notification.Name.willEnterForegroundNotification, object: nil)
         
         g.navBarWidth  = self.navigationController?.navigationBar.frame.width ?? 320
         g.tabBarHeight = self.tabBarController?.tabBar.frame.height ?? 40
@@ -58,14 +58,19 @@ class SiriusViewController: UITableViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(networkInterruption(_:)), name: NSNotification.Name.AVPlayerItemPlaybackStalled, object: nil)
         
         restartPDT()
-        g.ChannelList = nil
+        //g.ChannelList = nil
         g.ChannelData = nil
     }
     
     @objc func networkInterruption(_ notification: Notification) {
         //if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error?
+        let channel = self.g.ChannelList?[self.g.currentChannel] as? [String: Any]
+        let channelId = channel?["channelId"] as? String ?? "siriushits1"
+        self.sessionSVC(channelId: channelId)
+        
         
         DispatchQueue.global(qos: .default).async {
+            print("Current Channel", self.g.currentChannelName)
             let sp = self.p
             if sp.state == .playing {
                 sp.pause()
@@ -75,6 +80,18 @@ class SiriusViewController: UITableViewController {
             }
         }
     }
+   
+    func sessionSVC(channelId: String) {
+        let endpoint = g.insecure + Global.obj.local + ":" + String(p.port) + "/api/v3/session"
+        let method = "cookies"
+        let request = ["channelid": channelId] as Dictionary
+        
+        Async.api.Post(request: request, endpoint: endpoint, method: method) { _ in
+            
+        }
+    }
+
+
     
     @objc func handleRouteChange(_ notification: Notification) {
         
@@ -126,6 +143,11 @@ class SiriusViewController: UITableViewController {
             if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
                 let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
                 if options.contains(.shouldResume) {
+                    
+                    let channel = self.g.ChannelList?[self.g.currentChannel] as? [String: Any]
+                    let channelId = channel?["channelId"] as? String ?? "siriushits1"
+                    self.sessionSVC(channelId: channelId)
+                    
                     // Interruption Ended - playback should resume
                     p.state = PlayerState.paused
                     p.new(.stream)
@@ -147,7 +169,7 @@ class SiriusViewController: UITableViewController {
     }
     
     @objc func SPXStream() {
-        checkServer()
+        //checkServer()
         
         let ps = p.self
         
@@ -185,10 +207,10 @@ class SiriusViewController: UITableViewController {
             self.pdtTimer = Timer.scheduledTimer(timeInterval: 20.0, target: self, selector: #selector(self.SPXCache), userInfo: nil, repeats: true)
         }
         
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.streamTimer = Timer.scheduledTimer(timeInterval: 10.0, target: self, selector: #selector(self.SPXStream), userInfo: nil, repeats: true)
-        }
+//        DispatchQueue.main.async { [weak self] in
+//            guard let self = self else { return }
+//            self.streamTimer = Timer.scheduledTimer(timeInterval: 10.0, target: self, selector: #selector(self.SPXStream), userInfo: nil, repeats: true)
+//        }
     }
     
     deinit {
