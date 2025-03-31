@@ -8,6 +8,7 @@ SPX-Viper.workspace
 - StarPlayrXServe, Swift Package (Viper Embedded HTTP Web Server featuring Apple's Network Framework)
 - StarPlayrRadioKit, Swift Package (SXM Web API Middleware)
 
+- Viper, aka StarPlayrXServe is built using AI.
 
 Copyright 2025 Todd Bruss. All Rights Reserved.
 Property of CodeFreeze.ai
