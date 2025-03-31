@@ -1,0 +1,23 @@
+{
+  "pins" : [
+    {
+      "identity" : "starplayrradiokit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/StarPlayrX/StarPlayrRadioKit",
+      "state" : {
+        "branch" : "mustang",
+        "revision" : "9468a75e4bd482662c7f9d265074886676e6050a"
+      }
+    },
+    {
+      "identity" : "swifterlite",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/StarPlayrX/SwifterLite",
+      "state" : {
+        "branch" : "mustang",
+        "revision" : "ca347acbb8b54b725301670250944bc803100118"
+      }
+    }
+  ],
+  "version" : 2
+}

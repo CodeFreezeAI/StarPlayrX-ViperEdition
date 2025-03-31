@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "swifterlite",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/StarPlayrX/SwifterLite",
+      "state" : {
+        "branch" : "mustang",
+        "revision" : "aa906169ea176d332a0d71c01894b067a02c5d51"
+      }
+    }
+  ],
+  "version" : 2
+}
