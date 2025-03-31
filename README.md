@@ -5,7 +5,7 @@
 ## Features:
 SPX-Viper.workspace
 - StarPlayrX iOS App, Accessible SiriusXM Radio Player
-- StarPlayrXServe, Swift Package (Viper Embedded HTTP Web Server featuring Network Framework)
+- StarPlayrXServe, Swift Package (Viper Embedded HTTP Web Server featuring Apple's Network Framework)
 - StarPlayrRadioKit, Swift Package (SXM Web API Middleware)
 
 
