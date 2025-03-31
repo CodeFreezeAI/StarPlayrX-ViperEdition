@@ -1,4 +1,4 @@
-# StarPlayrX 1.3.1 Viper Editon
+# StarPlayrX 1.3.1 Viper Edition
 
 <img width="280" alt="image" src="https://github.com/user-attachments/assets/5519b59a-effa-442a-8397-d77c364e335c" />
 
