@@ -6,4 +6,7 @@
 - StarPlayrRadioKit, Swift Package
 - StarPlayrXServe, Swift Package (Viper Embedded HTTP Web Server featuring Network Framework).
 
-Copyright 2025 Todd Bruss
+Copyright 2025 Todd Bruss. All Rights Reserved.
+Property of CodeFreeze.ai
+
+StarPlayr is a registered trademark of NiceMac LLC.
