@@ -40,7 +40,6 @@ public class Network {
         }
         
         startServer(Player.shared.port)
-        jumpStart()
     }
     
     //MARK: Port Finder - This is some deep sh*t

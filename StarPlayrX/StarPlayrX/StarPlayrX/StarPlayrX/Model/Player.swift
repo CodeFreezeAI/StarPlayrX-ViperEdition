@@ -101,7 +101,7 @@ final class Player: NSObject, AVAssetResourceLoaderDelegate {
     }
     
     var player = AVQueuePlayer()
-    var port: UInt16 = 9999 + 10
+    var port: UInt16 = 9999
     var everything = "All Channels"
     var allStars = "All Stars"
     var SPXPresets = [String]()
@@ -160,23 +160,10 @@ final class Player: NSObject, AVAssetResourceLoaderDelegate {
         
         DispatchQueue.global().async { [self] in
             let pinpoint = "\(g.insecure)\(g.localhost):\(port)/api/v3/ping"
-            
-            log("Checking server connection with ping...")
-            Async.api.Text(endpoint: pinpoint, timeOut: 3) { [self] pong in
-                guard let ping = pong else { 
-                    log("Ping failed, launching server...")
-                    launchServer()
-                    return 
-                }
-                
-                if ping == "pong" {
-                    log("Server connection verified")
-                    // Reset reconnection counter on successful ping
-                    reconnectionAttempts = 0
-                    spx(state)
-                } else {
-                    log("Server responded with unexpected value: \(ping)")
-                    launchServer()
+
+            Async.api.Text(endpoint: pinpoint) { ping in
+                if let ping = ping, ping != "pong" {
+                    net.LaunchServer()
                 }
             }
         }
@@ -757,15 +744,8 @@ final class Player: NSObject, AVAssetResourceLoaderDelegate {
             synthesizer.speak(utterance)
         }
         
-        //Find the first Open port
-        for i in self.port..<65000 {
-            if Network.ability.open(port: UInt16(i)) {
-                self.port = UInt16(i)
-                break
-            }
-        }
-        startServer(self.port)
-        jumpStart()
+        
+      //  jumpStart()
         
         completionHandler(true)
     }
@@ -861,17 +841,17 @@ final class Player: NSObject, AVAssetResourceLoaderDelegate {
     }
 }
 
-func jumpStart() {
-    let net = Network.ability
-    net.start()
-    let locale = Locale.current
-    
-    if locale.regionCode == "CA" || locale.regionCode == "CAN" {
-        preflightConfig(location: "CA")
-    } else {
-        preflightConfig(location: "US")
-    }
-}
+//func jumpStart() {
+//    let net = Network.ability
+//    net.start()
+//    let locale = Locale.current
+//    
+//    if locale.regionCode == "CA" || locale.regionCode == "CAN" {
+//        preflightConfig(location: "CA")
+//    } else {
+//        preflightConfig(location: "US")
+//    }
+//}
 
 // Add new notification names
 extension Notification.Name {

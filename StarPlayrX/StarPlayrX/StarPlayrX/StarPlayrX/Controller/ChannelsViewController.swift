@@ -285,7 +285,7 @@ class ChannelsViewController: UITableViewController,UISearchBarDelegate {
     }
     
     func sessionCVC(channelId: String) {
-        let endpoint = g.insecure + Global.obj.local + ":" + String(p.port) + "/api/v3/session"
+        let endpoint = g.insecure + Global.obj.local + ":" + String(self.p.port) + "/api/v3/session"
         let method = "cookies"
         let request = ["channelid": channelId] as Dictionary
         

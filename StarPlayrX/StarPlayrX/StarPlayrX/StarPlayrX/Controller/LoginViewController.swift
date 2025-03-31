@@ -113,7 +113,7 @@ class LoginViewController: UIViewController {
     func login() {
         checkForNetworkError()
 
-        let endpoint = g.insecure + g.local + ":" + String(p.port)  + "/api/v3/login"
+        let endpoint = g.insecure + g.local + ":" + String(self.p.port)  + "/api/v3/login"
         let method = "login"
         let request = ["user":g.Username,"pass":g.Password] as Dictionary
     
