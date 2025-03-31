@@ -10,8 +10,9 @@ import Foundation
 import StarPlayrRadioKit
 import MediaPlayer
 import UIKit
+import AVFoundation
 
-final class Player {
+final class Player: NSObject, AVAssetResourceLoaderDelegate {
     static let shared = Player()
     
     let g = Global.obj
@@ -19,6 +20,85 @@ final class Player {
     
     public let PlayerQueue = DispatchQueue(label: "PlayerQueue", qos: .userInitiated )
     public let PDTqueue = DispatchQueue(label: "PDT", qos: .userInteractive, attributes: .concurrent)
+    
+    // Simple file logger for debugging when disconnected from Xcode
+    struct Logger {
+        static let shared = Logger()
+        private let fileURL: URL?
+        private let dateFormatter: DateFormatter
+        private let logQueue = DispatchQueue(label: "com.starplayrx.logger", qos: .background)
+        
+        init() {
+            let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+            fileURL = paths.first?.appendingPathComponent("starplayrx_log.txt")
+            
+            dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+            
+            // Create or clear log file on startup
+            clearLog()
+        }
+        
+        func log(_ message: String) {
+            logQueue.async {
+                guard let fileURL = self.fileURL else { return }
+                let timestamp = self.dateFormatter.string(from: Date())
+                let logMessage = "[\(timestamp)] \(message)\n"
+                
+                if let data = logMessage.data(using: .utf8) {
+                    if FileManager.default.fileExists(atPath: fileURL.path) {
+                        // Append to existing file
+                        if let fileHandle = try? FileHandle(forWritingTo: fileURL) {
+                            fileHandle.seekToEndOfFile()
+                            fileHandle.write(data)
+                            fileHandle.closeFile()
+                        }
+                    } else {
+                        // Create new file
+                        try? data.write(to: fileURL)
+                    }
+                }
+                
+                // Also print to console for when debugger is attached
+                print(logMessage)
+            }
+        }
+        
+        func clearLog() {
+            logQueue.async {
+                guard let fileURL = self.fileURL else { return }
+                let header = "--- StarPlayrX Log Started \(self.dateFormatter.string(from: Date())) ---\n"
+                try? header.data(using: .utf8)?.write(to: fileURL)
+            }
+        }
+        
+        func getLogURL() -> URL? {
+            return fileURL
+        }
+        
+        // Get filtered logs that match a specific keyword
+        func getFilteredLogs(filter: String? = nil) -> String? {
+            guard let fileURL = self.fileURL,
+                  let data = try? Data(contentsOf: fileURL),
+                  var logString = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            
+            // If filter is provided, only show lines containing that keyword
+            if let filter = filter, !filter.isEmpty {
+                let lines = logString.components(separatedBy: .newlines)
+                let filteredLines = lines.filter { $0.localizedCaseInsensitiveContains(filter) }
+                logString = filteredLines.joined(separator: "\n")
+            }
+            
+            return logString
+        }
+    }
+    
+    // Log a message both to console and to the log file
+    func log(_ message: String) {
+        Logger.shared.log(message)
+    }
     
     var player = AVQueuePlayer()
     var port: UInt16 = 9999 + 10
@@ -31,7 +111,24 @@ final class Player {
     var preArtistSong = ""
     var setAlbumArt = false
     var maxAlbumAttempts = 3
-    var state : PlayerState? = nil
+    var state : PlayerState = .paused
+    var previousHash = "reset"
+    let avSession = AVAudioSession.sharedInstance()
+    
+    // Add connection monitoring and recovery
+    private var connectionMonitorTimer: Timer?
+    private var heartbeatTimer: Timer?
+    private var reconnectionAttempts = 0
+    private var maxReconnectionAttempts = 3
+    private var lastConnectionActivity = Date()
+    
+    // MARK: - AVAssetResourceLoaderDelegate
+    
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        // This method is required but we don't need custom resource loading behavior
+        // Simply pass through the original requests
+        return false
+    }
     
     func resetAirPlayVolumeX() {
         if avSession.currentRoute.outputs.first?.portType == .airPlay {
@@ -42,7 +139,6 @@ final class Player {
     }
     
     func spx(_ state: PlayerState?) {
-        
         if state == .stream {
             if isMacCatalystApp {
                 self.resetPlayer()
@@ -59,19 +155,168 @@ final class Player {
     }
     
     func new(_ state: PlayerState?) {
+        // Update last connection activity time
+        self.lastConnectionActivity = Date()
+        
         DispatchQueue.global().async { [self] in
             let pinpoint = "\(g.insecure)\(g.localhost):\(port)/api/v3/ping"
-            Async.api.Text(endpoint: pinpoint, timeOut: 1 ) { [self] pong in
-                guard let ping = pong else { launchServer(); return }
-                ping == "pong" ? spx(state) : ( launchServer() )
+            
+            log("Checking server connection with ping...")
+            Async.api.Text(endpoint: pinpoint, timeOut: 3) { [self] pong in
+                guard let ping = pong else { 
+                    log("Ping failed, launching server...")
+                    launchServer()
+                    return 
+                }
+                
+                if ping == "pong" {
+                    log("Server connection verified")
+                    // Reset reconnection counter on successful ping
+                    reconnectionAttempts = 0
+                    spx(state)
+                } else {
+                    log("Server responded with unexpected value: \(ping)")
+                    launchServer()
+                }
             }
         }
-      
+    }
+    
+    // Start monitoring the connection with regular heartbeats
+    private func startConnectionMonitoring() {
+        stopConnectionMonitoring() // Clear any existing timers
+        
+        // Create a timer that checks connection health every 10 seconds
+        connectionMonitorTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            self?.checkConnectionHealth()
+        }
+        
+        // Create a heartbeat timer that logs connection status more frequently
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.logHeartbeat()
+        }
+    }
+    
+    // Log connection heartbeat
+    private func logHeartbeat() {
+        if state == .playing {
+            let timeSinceLastActivity = -lastConnectionActivity.timeIntervalSinceNow
+            log("HEARTBEAT: Connection active, \(String(format: "%.1f", timeSinceLastActivity))s since last activity")
+            
+            // Log player status
+            if let currentItem = player.currentItem {
+                let bufferEmpty = currentItem.isPlaybackBufferEmpty
+                let bufferFull = currentItem.isPlaybackLikelyToKeepUp
+                let playing = player.rate > 0
+                log("HEARTBEAT: Player status - playing: \(playing), buffer empty: \(bufferEmpty), buffer likely to keep up: \(bufferFull)")
+            }
+        }
+    }
+    
+    // Check if the connection is healthy
+    private func checkConnectionHealth() {
+        guard state == .playing || state == .buffering else {
+            // Only monitor connection when we're supposed to be playing
+            return
+        }
+        
+        let timeSinceLastActivity = -lastConnectionActivity.timeIntervalSinceNow
+        log("Checking connection health. Time since last activity: \(String(format: "%.1f", timeSinceLastActivity))s")
+        
+        // If it's been more than 20 seconds since the last activity, check the connection
+        if timeSinceLastActivity > 20.0 {
+            log("Connection may be stalled, checking server connection")
+            checkServerConnection()
+        }
+    }
+    
+    // Stop all connection monitoring
+    private func stopConnectionMonitoring() {
+        connectionMonitorTimer?.invalidate()
+        connectionMonitorTimer = nil
+        
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        
+        reconnectionAttempts = 0
+    }
+    
+    // Check if the server is still responsive
+    func checkServerConnection() {
+        // Update last activity time to prevent multiple checks in quick succession
+        lastConnectionActivity = Date()
+        
+        log("Checking server connection")
+        let pingUrl = "\(g.insecure)\(g.localhost):" + String(port) + "/api/v3/ping"
+        
+        Async.api.Text(endpoint: pingUrl, timeOut: 3) { [weak self] response in
+            guard let self = self else { return }
+            
+            if let response = response, response == "pong" {
+                // Connection is good
+                self.log("Server connection check successful - received pong")
+                self.lastConnectionActivity = Date()
+                self.reconnectionAttempts = 0
+                
+                // If we're supposed to be playing but aren't, try to resume
+                if (self.state == .playing || self.state == .buffering) && self.player.rate == 0 {
+                    self.log("Player was stalled but connection is good, resuming playback")
+                    self.play()
+                }
+            } else {
+                // Connection issue detected
+                self.log("Server connection check failed - no pong response")
+                self.handleConnectionIssue()
+            }
+        }
+    }
+    
+    // Handle connection issues by attempting to reconnect
+    private func handleConnectionIssue() {
+        if reconnectionAttempts < maxReconnectionAttempts {
+            reconnectionAttempts += 1
+            log("Attempting server reconnection (\(reconnectionAttempts)/\(maxReconnectionAttempts))")
+            
+            // Try to relaunch the server
+            startServerReconnect()
+        } else {
+            log("Max reconnection attempts reached, stopping playback")
+            stop()
+            reconnectionAttempts = 0
+            
+            // Post notification about connection failure
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .serverConnectionLost, object: nil)
+            }
+        }
+    }
+    
+    // Launch the server for recovery attempts
+    private func startServerReconnect() {
+        log("Launching server for reconnection...")
+        autoLaunchServer { success in
+            if success {
+                self.log("Server launched successfully, attempting to reconnect")
+                // Wait a moment for the server to fully initialize
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self = self else { return }
+                    
+                    if self.state == .playing || self.state == .buffering {
+                        self.play()
+                    }
+                }
+            } else {
+                self.log("Server launch failed")
+                // Notify UI of launch failure
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .serverLaunchFailed, object: nil)
+                }
+            }
+        }
     }
     
     //MARK: Update the screen
     func syncArt() {
-        
         if let sha256 = sha256(String(CACurrentMediaTime().description)) {
             self.previousHash = sha256
         } else {
@@ -87,8 +332,27 @@ final class Player {
     
     //MARK: Launch Server and Stream
     func launchServer() {
-        autoLaunchServer(){ success in
-            success ? play() : stop()
+        log("Launching server...")
+        autoLaunchServer(){ [weak self] success in
+            guard let self = self else { return }
+            
+            if success {
+                self.log("Server launched successfully")
+                self.lastConnectionActivity = Date()
+                
+                // Only restart playback if we were playing before
+                if self.state == .playing || self.state == .buffering {
+                    self.play()
+                }
+            } else {
+                self.log("Server launch failed")
+                self.stop()
+                
+                // Post notification about server launch failure
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .serverLaunchFailed, object: nil)
+                }
+            }
         }
     }
     
@@ -99,53 +363,101 @@ final class Player {
         NotificationCenter.default.post(name: .didUpdatePause, object: nil)
         self.resetPlayer()
         self.player = AVQueuePlayer()
+        
+        // Stop connection monitoring when we stop playing
+        stopConnectionMonitoring()
+        
+        log("Player stopped")
     }
     
     func stream() {
-        SPXCache()
-        state = .playing
-        NotificationCenter.default.post(name: .didUpdatePlay, object: nil)
+        SPXCache() // Cache program data
         
-        guard
-            let url = URL(string: "\(g.insecure)\(g.localhost):\(port)/api/v3/m3u/\(g.currentChannel)\(g.m3u8)")
-        else {
+        // Create URL from channel ID
+        guard let url = URL(string: "\(g.insecure)\(g.localhost):\(port)/api/v3/m3u/\(g.currentChannel)\(g.m3u8)") else {
+            log("Invalid URL")
             return
         }
         
+        // Update last activity time
+        self.lastConnectionActivity = Date()
+        log("Starting stream for channel \(g.currentChannel)")
+        
+        // Create asset with better configuration
+        let assetOptions: [String: Any] = [
+            "AVURLAssetHTTPHeaderFieldsKey": ["Connection": "keep-alive"],
+            "AVURLAssetOutOfBandMIMETypeKey": "application/x-mpegURL"
+        ]
+        let asset = AVURLAsset(url: url, options: assetOptions)
+        
+        // Create player item with better settings
+        let playerItem = AVPlayerItem(asset: asset)
+        playerItem.preferredForwardBufferDuration = 1
+        playerItem.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+        
+        // Add observers for player item
+        NotificationCenter.default.addObserver(self, 
+                                              selector: #selector(playerItemFailed(_:)), 
+                                              name: .AVPlayerItemFailedToPlayToEndTime, 
+                                              object: playerItem)
+        
+        NotificationCenter.default.addObserver(self, 
+                                              selector: #selector(playerItemStalled(_:)), 
+                                              name: .AVPlayerItemPlaybackStalled, 
+                                              object: playerItem)
+        
         let p = self.player
         p.volume = 0
-        p.replaceCurrentItem(with: AVPlayerItem(asset:AVAsset(url: url)))
+        p.replaceCurrentItem(with: playerItem)
         p.playImmediately(atRate: 1.0)
-        
         p.fadeVolume(from: 0, to: 1, duration: Float(2.5))
-      
-
-//        var spx = false
-
-//        for i in 0...20 {
-//            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i / 2)) { [self] in
-//                if p.rate == 1 && !spx {
-//
-//                    NotificationCenter.default.post(name: .didUpdatePlay, object: nil)
-//                    spx.toggle()
-//                }
-//            }
-//
-//            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i / 2)) {
-//                if p.rate == 1 { return }
-//
-//                if p.rate < 1 {
-//                    p.playImmediately(atRate: 1.0)
-//                }
-//
-//                if i >= 5 && p.volume < 1 {
-//                    p.fadeVolume(from: p.volume, to: 1, duration: Float(0.5))
-//                }
-//            }
-//        }
+        
+        // Update state and start monitoring
+        state = .playing
+        NotificationCenter.default.post(name: .didUpdatePlay, object: nil)
+        
+        // Update last activity time
+        self.lastConnectionActivity = Date()
+        
+        // Start monitoring connection
+        startConnectionMonitoring()
+        
+        // Log that playback has started
+        log("Stream started successfully")
+    }
+    
+    @objc func playerItemFailed(_ notification: Notification) {
+        log("Player item failed to play")
+        if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
+            log("Player error: \(error.localizedDescription)")
+        }
+        
+        // Only try to recover if we should be playing
+        if state == .playing || state == .buffering {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.log("Attempting to recover from playback failure")
+                self?.checkServerConnection()
+            }
+        }
+    }
+    
+    @objc func playerItemStalled(_ notification: Notification) {
+        log("Player item stalled")
+        
+        // Only try to recover if we should be playing
+        if state == .playing || state == .buffering {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.log("Attempting to recover from playback stall")
+                self?.play()
+            }
+        }
     }
     
     func play() {
+        // Update last activity time
+        self.lastConnectionActivity = Date()
+        log("Starting playback")
+        
         let p = self.player
         let currentItem = p.currentItem
         
@@ -157,45 +469,47 @@ final class Player {
         p.fadeVolume(from: 1, to: 0, duration: Float(wait))
         state = .buffering
         
+        // Configure player item with better settings
+        configurePlayerItem(p)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(wait)) { [weak self] in
+            self?.stream()
+        }
+    }
+    
+    func configurePlayerItem(_ player: AVQueuePlayer) {
         if #available(iOS 13.0, *) {
-            p.currentItem?.automaticallyPreservesTimeOffsetFromLive = true
+            player.currentItem?.automaticallyPreservesTimeOffsetFromLive = true
         }
 
-        p.currentItem?.preferredForwardBufferDuration = 0
-        p.currentItem?.canUseNetworkResourcesForLiveStreamingWhilePaused = true
-        p.automaticallyWaitsToMinimizeStalling = true
-        p.appliesMediaSelectionCriteriaAutomatically = true
-        p.allowsExternalPlayback = true
+        player.currentItem?.preferredForwardBufferDuration = 0
+        player.currentItem?.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+        player.automaticallyWaitsToMinimizeStalling = true
+        player.appliesMediaSelectionCriteriaAutomatically = true
+        player.allowsExternalPlayback = true
         
         DispatchQueue.main.asyncAfter(deadline: .now() + avSession.outputLatency * 2.0) { [weak self] in
             self?.player.currentItem?.preferredForwardBufferDuration = 1
-        }
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + Double(wait)) {
-            self.stream()
         }
     }
     
     func change() {
-        let p = self.player
+        // Update last activity time
+        self.lastConnectionActivity = Date()
         
-        p.currentItem?.preferredForwardBufferDuration = 0
-        
-        if #available(iOS 13.0, *) {
-            p.currentItem?.automaticallyPreservesTimeOffsetFromLive = true
-        }
-        
-        p.currentItem?.canUseNetworkResourcesForLiveStreamingWhilePaused = true
-        p.automaticallyWaitsToMinimizeStalling = true
-        p.appliesMediaSelectionCriteriaAutomatically = true
-        p.allowsExternalPlayback = true
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + avSession.outputLatency * 2.0) { [weak self] in
-            self?.player.currentItem?.preferredForwardBufferDuration = 1
-        }
+        configurePlayerItem(self.player)
     }
     
     func runReset(starplayrx: AVPlayerItem) {
+        // Remove item observers
+        NotificationCenter.default.removeObserver(self, 
+                                                name: .AVPlayerItemFailedToPlayToEndTime, 
+                                                object: starplayrx)
+        
+        NotificationCenter.default.removeObserver(self, 
+                                                name: .AVPlayerItemPlaybackStalled, 
+                                                object: starplayrx)
+        
         player.replaceCurrentItem(with: nil)
         starplayrx.asset.cancelLoading()
         player.remove(starplayrx)
@@ -213,9 +527,10 @@ final class Player {
         NotificationCenter.default.post(name: .didUpdatePause, object: nil)
         self.resetPlayer()
         self.player = AVQueuePlayer()
+        
+        // Stop connection monitoring when paused
+        stopConnectionMonitoring()
     }
-    
-    var previousHash = "reset"
     
     //MARK: Update our display
     func updateDisplay(key: String, cache: [String : Any], channelArt: String, _ animated: Bool = true) {
@@ -459,8 +774,6 @@ final class Player {
         new(nil)
     }
     
-    let avSession = AVAudioSession.sharedInstance()
-    
     ///These are used on the iPhone's lock screen
     ///Command Center routines
     func setupRemoteTransportControls(application: UIApplication) {
@@ -468,30 +781,83 @@ final class Player {
             avSession.accessibilityPerformMagicTap()
             avSession.accessibilityActivate()
             try avSession.setPreferredIOBufferDuration(0)
-            try avSession.setCategory(.playback, mode: .default, policy: .longFormAudio, options: [])
+            try avSession.setCategory(.playback, mode: .default, policy: .longFormAudio, options: [.allowAirPlay])
             try avSession.setActive(true)
             
+            // Add interruption observer
+            NotificationCenter.default.addObserver(self, 
+                                                 selector: #selector(handleAudioInterruption), 
+                                                 name: AVAudioSession.interruptionNotification, 
+                                                 object: nil)
+            
         } catch {
-            print(error)
+            print("Audio session error: \(error)")
         }
         
         // Get the shared MPRemoteCommandCenter
         let commandCenter = MPRemoteCommandCenter.shared()
         commandCenter.accessibilityActivate()
-        commandCenter.playCommand.addTarget(handler: { (event) in
-            //print("1")
+        
+        // Clear existing handlers first to avoid duplicates
+        commandCenter.playCommand.removeTarget(nil)
+        commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.togglePlayPauseCommand.removeTarget(nil)
+        
+        commandCenter.playCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            print("Remote command: Play")
             self.new(.stream)
-            return MPRemoteCommandHandlerStatus.success}
-        )
-        commandCenter.pauseCommand.addTarget(handler: { (event) in
-            //print("2")
-            self.new(.playing)
-            return MPRemoteCommandHandlerStatus.success}
-        )
-        commandCenter.togglePlayPauseCommand.addTarget(handler: { (event) in
-            self.new(.playing)
-            return MPRemoteCommandHandlerStatus.success}
-        )
+            return .success
+        }
+        
+        commandCenter.pauseCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            print("Remote command: Pause")
+            self.new(.paused)
+            return .success
+        }
+        
+        commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            print("Remote command: Toggle")
+            self.new(nil)
+            return .success
+        }
+    }
+    
+    @objc func handleAudioInterruption(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+        
+        switch type {
+        case .began:
+            // Interruption began, update state but don't change playback yet
+            log("Audio session interrupted")
+            if state == .playing {
+                // Remember we were playing, but don't change state yet
+                player.pause()
+            }
+            
+        case .ended:
+            // Interruption ended - check if we should resume
+            log("Audio interruption ended")
+            
+            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
+                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+                if options.contains(.shouldResume) {
+                    log("Should resume after interruption")
+                    
+                    // Check server connection before resuming
+                    checkServerConnection()
+                }
+            }
+            
+        @unknown default:
+            break
+        }
     }
 }
 
@@ -505,4 +871,10 @@ func jumpStart() {
     } else {
         preflightConfig(location: "US")
     }
+}
+
+// Add new notification names
+extension Notification.Name {
+    static let serverConnectionLost = Notification.Name("serverConnectionLost")
+    static let serverLaunchFailed = Notification.Name("serverLaunchFailed")
 }

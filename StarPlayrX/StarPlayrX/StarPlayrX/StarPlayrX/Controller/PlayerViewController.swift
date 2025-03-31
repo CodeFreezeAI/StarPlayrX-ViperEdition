@@ -51,6 +51,386 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
     //Art Queue
     public let ArtQueue = DispatchQueue(label: "ArtQueue", qos: .background )
     
+    // Add status indicator for visual feedback
+    private var statusLabel: UILabel?
+    private var statusFadeTimer: Timer?
+    private var connectionCheckButton: UIButton?
+    private var debugLogButton: UIButton?
+    var isMacCatalystApp = false
+    
+    // Create a status indicator to show connection status
+    private func setupStatusIndicator() {
+        // Create status label
+        let label = UILabel()
+        label.textAlignment = .center
+        label.textColor = .white
+        label.backgroundColor = UIColor(white: 0, alpha: 0.7)
+        label.layer.cornerRadius = 10
+        label.clipsToBounds = true
+        label.alpha = 0
+        label.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+        mainView.addSubview(label)
+        
+        // Position it at the bottom of the screen
+        label.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: mainView.centerXAnchor),
+            label.bottomAnchor.constraint(equalTo: mainView.safeAreaLayoutGuide.bottomAnchor, constant: -20),
+            label.widthAnchor.constraint(lessThanOrEqualTo: mainView.widthAnchor, constant: -40),
+            label.heightAnchor.constraint(greaterThanOrEqualToConstant: 30)
+        ])
+        
+        statusLabel = label
+        
+        // Add a manual connection check button (debug only)
+        #if DEBUG
+        let button = UIButton(type: .system)
+        button.setTitle("Check Connection", for: .normal)
+        button.backgroundColor = UIColor(white: 0, alpha: 0.7)
+        button.setTitleColor(.white, for: .normal)
+        button.layer.cornerRadius = 10
+        button.clipsToBounds = true
+        button.alpha = 0.8
+        button.addTarget(self, action: #selector(checkConnection), for: .touchUpInside)
+        mainView.addSubview(button)
+        
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.centerXAnchor.constraint(equalTo: mainView.centerXAnchor),
+            button.bottomAnchor.constraint(equalTo: label.topAnchor, constant: -10),
+            button.widthAnchor.constraint(lessThanOrEqualTo: mainView.widthAnchor, constant: -40),
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
+        ])
+        
+        connectionCheckButton = button
+        #endif
+        
+        // Add logs button (available in all builds)
+        let logButton = UIButton(type: .system)
+        logButton.setTitle("View Logs", for: .normal)
+        logButton.backgroundColor = UIColor(white: 0, alpha: 0.7)
+        logButton.setTitleColor(.white, for: .normal)
+        logButton.layer.cornerRadius = 10
+        logButton.clipsToBounds = true
+        logButton.alpha = 0.8
+        logButton.addTarget(self, action: #selector(viewLogs), for: .touchUpInside)
+        mainView.addSubview(logButton)
+        
+        logButton.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            logButton.trailingAnchor.constraint(equalTo: mainView.safeAreaLayoutGuide.trailingAnchor, constant: -20),
+            logButton.topAnchor.constraint(equalTo: mainView.safeAreaLayoutGuide.topAnchor, constant: 10),
+            logButton.widthAnchor.constraint(equalToConstant: 90),
+            logButton.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        
+        debugLogButton = logButton
+    }
+    
+    @objc private func checkConnection() {
+        showStatus("Checking connection...")
+        Player.shared.checkServerConnection()
+    }
+    
+    @objc private func viewLogs() {
+        // Present logs view
+        let logsVC = UIViewController()
+        logsVC.title = "Connection Logs"
+        
+        // Set background color to match app theme
+        logsVC.view.backgroundColor = UIColor(displayP3Red: 19/255, green: 20/255, blue: 36/255, alpha: 1.0)
+        
+        // Create a text view to show logs
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.backgroundColor = UIColor(white: 0.1, alpha: 1.0)
+        textView.textColor = .white
+        textView.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        textView.contentInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
+        
+        // Create a filter segment control
+        let filterSegment = UISegmentedControl(items: ["All Logs", "Heartbeat"])
+        filterSegment.selectedSegmentIndex = 0
+        filterSegment.backgroundColor = UIColor(white: 0.2, alpha: 1.0)
+        if #available(iOS 13.0, *) {
+            filterSegment.selectedSegmentTintColor = UIColor.systemBlue
+        }
+        filterSegment.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .normal)
+        filterSegment.translatesAutoresizingMaskIntoConstraints = false
+        filterSegment.addTarget(self, action: #selector(filterLogsChanged(_:)), for: .valueChanged)
+        
+        logsVC.view.addSubview(filterSegment)
+        logsVC.view.addSubview(textView)
+        
+        NSLayoutConstraint.activate([
+            filterSegment.topAnchor.constraint(equalTo: logsVC.view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            filterSegment.leadingAnchor.constraint(equalTo: logsVC.view.leadingAnchor, constant: 16),
+            filterSegment.trailingAnchor.constraint(equalTo: logsVC.view.trailingAnchor, constant: -16),
+            filterSegment.heightAnchor.constraint(equalToConstant: 32),
+            
+            textView.topAnchor.constraint(equalTo: filterSegment.bottomAnchor, constant: 8),
+            textView.leadingAnchor.constraint(equalTo: logsVC.view.leadingAnchor),
+            textView.trailingAnchor.constraint(equalTo: logsVC.view.trailingAnchor),
+            textView.bottomAnchor.constraint(equalTo: logsVC.view.safeAreaLayoutGuide.bottomAnchor, constant: -44)
+        ])
+        
+        // Add a toolbar with refresh and share buttons
+        let toolbar = UIToolbar()
+        toolbar.barStyle = .black
+        toolbar.isTranslucent = true
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+        logsVC.view.addSubview(toolbar)
+        
+        NSLayoutConstraint.activate([
+            toolbar.leadingAnchor.constraint(equalTo: logsVC.view.leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: logsVC.view.trailingAnchor),
+            toolbar.bottomAnchor.constraint(equalTo: logsVC.view.safeAreaLayoutGuide.bottomAnchor),
+            toolbar.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        
+        let refreshButton = UIBarButtonItem(barButtonSystemItem: .refresh, target: self, action: #selector(refreshLogs(_:)))
+        let clearButton = UIBarButtonItem(title: "Clear", style: .plain, target: self, action: #selector(clearLogs(_:)))
+        let shareButton = UIBarButtonItem(barButtonSystemItem: .action, target: self, action: #selector(shareLogs(_:)))
+        let flexSpace = UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
+        
+        toolbar.items = [refreshButton, flexSpace, clearButton, flexSpace, shareButton]
+        
+        // Try to read log file
+        if let logString = Player.Logger.shared.getFilteredLogs() {
+            textView.text = logString
+            // Scroll to bottom
+            if logString.count > 0 {
+                let bottom = NSRange(location: logString.count - 1, length: 1)
+                textView.scrollRangeToVisible(bottom)
+            }
+        } else {
+            textView.text = "No logs available"
+        }
+        
+        // Show loading indicator
+        let activityIndicator = UIActivityIndicatorView(style: .medium)
+        activityIndicator.color = .white
+        activityIndicator.hidesWhenStopped = true
+        activityIndicator.translatesAutoresizingMaskIntoConstraints = false
+        logsVC.view.addSubview(activityIndicator)
+        
+        NSLayoutConstraint.activate([
+            activityIndicator.centerXAnchor.constraint(equalTo: logsVC.view.centerXAnchor),
+            activityIndicator.centerYAnchor.constraint(equalTo: logsVC.view.centerYAnchor)
+        ])
+        
+        activityIndicator.startAnimating()
+        
+        // Present the logs view controller
+        let navController = UINavigationController(rootViewController: logsVC)
+        navController.navigationBar.barStyle = .black
+        navController.navigationBar.tintColor = .white
+        if #available(iOS 13.0, *) {
+            navController.modalPresentationStyle = .automatic
+        } else {
+            navController.modalPresentationStyle = .fullScreen
+        }
+        
+        // Add close button
+        let closeButton = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(dismissLogs))
+        logsVC.navigationItem.rightBarButtonItem = closeButton
+        
+        // Save text view and segment control references
+        objc_setAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 1)!, textView, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 2)!, activityIndicator, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 3)!, filterSegment, .OBJC_ASSOCIATION_RETAIN)
+        
+        present(navController, animated: true) {
+            activityIndicator.stopAnimating()
+        }
+    }
+    
+    @objc private func filterLogsChanged(_ sender: UISegmentedControl) {
+        guard let logsVC = (presentedViewController as? UINavigationController)?.topViewController,
+              let textView = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 1)!) as? UITextView,
+              let activityIndicator = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 2)!) as? UIActivityIndicatorView else {
+            return
+        }
+        
+        activityIndicator.startAnimating()
+        
+        DispatchQueue.global().async {
+            // Get filter based on segment selection
+            let filter = sender.selectedSegmentIndex == 1 ? "HEARTBEAT" : nil
+            
+            // Get filtered logs
+            let logString = Player.Logger.shared.getFilteredLogs(filter: filter) ?? "No logs available"
+            
+            DispatchQueue.main.async {
+                textView.text = logString
+                
+                // Scroll to bottom
+                if logString.count > 0 {
+                    let bottom = NSRange(location: logString.count - 1, length: 1)
+                    textView.scrollRangeToVisible(bottom)
+                }
+                
+                activityIndicator.stopAnimating()
+            }
+        }
+    }
+    
+    @objc private func clearLogs(_ sender: UIBarButtonItem) {
+        // Clear log file and update display
+        Player.Logger.shared.clearLog()
+        
+        // Get the logs view controller and refresh
+        if let navController = presentedViewController as? UINavigationController,
+           let logsVC = navController.topViewController,
+           let textView = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 1)!) as? UITextView,
+           let activityIndicator = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 2)!) as? UIActivityIndicatorView {
+            
+            activityIndicator.startAnimating()
+            
+            // Update logs
+            DispatchQueue.global().async {
+                if let logURL = Player.Logger.shared.getLogURL(),
+                   let logData = try? Data(contentsOf: logURL),
+                   let logString = String(data: logData, encoding: .utf8) {
+                    
+                    DispatchQueue.main.async {
+                        textView.text = logString
+                        // Scroll to bottom
+                        if logString.count > 0 {
+                            let bottom = NSRange(location: logString.count - 1, length: 1)
+                            textView.scrollRangeToVisible(bottom)
+                        }
+                        activityIndicator.stopAnimating()
+                        
+                        // Show a success message
+                        let alertController = UIAlertController(
+                            title: "Logs Cleared",
+                            message: "The log file has been cleared successfully.",
+                            preferredStyle: .alert
+                        )
+                        
+                        alertController.addAction(UIAlertAction(title: "OK", style: .default))
+                        logsVC.present(alertController, animated: true)
+                    }
+                }
+            }
+        }
+    }
+    
+    @objc private func dismissLogs() {
+        dismiss(animated: true)
+    }
+    
+    @objc private func refreshLogs(_ sender: UIBarButtonItem) {
+        // Get the logs view controller
+        if let navController = presentedViewController as? UINavigationController,
+           let logsVC = navController.topViewController,
+           let textView = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 1)!) as? UITextView,
+           let activityIndicator = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 2)!) as? UIActivityIndicatorView,
+           let filterSegment = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 3)!) as? UISegmentedControl {
+            
+            activityIndicator.startAnimating()
+            
+            // Update logs
+            DispatchQueue.global().async {
+                // Get filter based on segment selection
+                let filter = filterSegment.selectedSegmentIndex == 1 ? "HEARTBEAT" : nil
+                
+                // Get filtered logs
+                let logString = Player.Logger.shared.getFilteredLogs(filter: filter) ?? "No logs available"
+                
+                DispatchQueue.main.async {
+                    textView.text = logString
+                    
+                    // Scroll to bottom
+                    if logString.count > 0 {
+                        let bottom = NSRange(location: logString.count - 1, length: 1)
+                        textView.scrollRangeToVisible(bottom)
+                    }
+                    
+                    activityIndicator.stopAnimating()
+                }
+            }
+        }
+    }
+    
+    @objc private func shareLogs(_ sender: UIBarButtonItem) {
+        if let navController = presentedViewController as? UINavigationController,
+           let logsVC = navController.topViewController,
+           let activityIndicator = objc_getAssociatedObject(logsVC, UnsafeRawPointer(bitPattern: 2)!) as? UIActivityIndicatorView {
+            
+            activityIndicator.startAnimating()
+            
+            if let logURL = Player.Logger.shared.getLogURL() {
+                // Ensure the file exists and has content
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path),
+                   let fileSize = attrs[.size] as? UInt64, fileSize > 0 {
+                    
+                    let activityVC = UIActivityViewController(activityItems: [logURL], applicationActivities: nil)
+                    
+                    // Present from the button on iPad
+                    if let popover = activityVC.popoverPresentationController {
+                        popover.barButtonItem = sender
+                    }
+                    
+                    logsVC.present(activityVC, animated: true) {
+                        activityIndicator.stopAnimating()
+                    }
+                } else {
+                    activityIndicator.stopAnimating()
+                    
+                    // Show alert for empty logs
+                    let alertController = UIAlertController(
+                        title: "Empty Logs",
+                        message: "The log file is empty or cannot be accessed.",
+                        preferredStyle: .alert
+                    )
+                    
+                    alertController.addAction(UIAlertAction(title: "OK", style: .default))
+                    logsVC.present(alertController, animated: true)
+                }
+            } else {
+                activityIndicator.stopAnimating()
+                
+                // Show alert for missing log file
+                let alertController = UIAlertController(
+                    title: "No Log File",
+                    message: "Could not locate the log file.",
+                    preferredStyle: .alert
+                )
+                
+                alertController.addAction(UIAlertAction(title: "OK", style: .default))
+                logsVC.present(alertController, animated: true)
+            }
+        }
+    }
+    
+    // Show a status message that fades after a delay
+    private func showStatus(_ message: String, duration: TimeInterval = 3.0) {
+        guard let statusLabel = statusLabel else { return }
+        
+        // Cancel any existing fade timer
+        statusFadeTimer?.invalidate()
+        
+        DispatchQueue.main.async {
+            // Add padding to the message
+            statusLabel.text = "  \(message)  "
+            
+            // Fade in
+            UIView.animate(withDuration: 0.3) {
+                statusLabel.alpha = 1.0
+            }
+            
+            // Set timer to fade out
+            self.statusFadeTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) {  _ in
+                UIView.animate(withDuration: 0.3) {
+                    statusLabel.alpha = 0
+                }
+            }
+        }
+    }
+    
     func Pulsar() {
         let pulseAnimation = CABasicAnimation(keyPath: "opacity")
         pulseAnimation.duration = 2
@@ -146,6 +526,7 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
         }
         
         drawPlayer(frame: mainView.frame, isPhone: isPhone, NavY: NavY, TabY: TabY)
+        setupStatusIndicator()
     }
     
     func drawPlayer(frame: CGRect, isPhone: Bool, NavY: CGFloat, TabY: CGFloat) {
@@ -228,6 +609,9 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
         NotificationCenter.default.addObserver(self, selector: #selector(GotNowPlayingInfoAnimated), name: .gotNowPlayingInfoAnimated, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(GotNowPlayingInfo), name: .gotNowPlayingInfo, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground), name: .willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleServerConnectionLost), name: .serverConnectionLost, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleServerLaunchFailed), name: .serverLaunchFailed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handlePlayerItemStalled), name: .AVPlayerItemPlaybackStalled, object: nil)
         startObservingVolumeChanges()
     }
     
@@ -237,6 +621,9 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
         NotificationCenter.default.removeObserver(self, name: .gotNowPlayingInfoAnimated, object: nil)
         NotificationCenter.default.removeObserver(self, name: .gotNowPlayingInfo, object: nil)
         NotificationCenter.default.removeObserver(self, name: .willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .serverConnectionLost, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .serverLaunchFailed, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemPlaybackStalled, object: nil)
         stopObservingVolumeChanges()
     }
     //MARK: End Observers
@@ -401,7 +788,7 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
         }
         
         func staticArtistSong() -> Array<(lbl: UILabel?, str: String)> {
-            let combo  = pdt.artist + " • " + pdt.song + " — " + g.currentChannelName
+            let combo  = pdt.artist + " • " + pdt.song + " — " + g.currentChannelName
             let artist = pdt.artist
             let song   = pdt.song
             
@@ -474,17 +861,19 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
         
         PlayerXL.accessibilityHint = ""
         
-        if Player.shared.player.isBusy {
+        if Player.shared.player.rate != 0 || Player.shared.state == .playing {
             DispatchQueue.main.async { [self] in
                 updatePlayPauseIcon(play: false)
                 Player.shared.new(.paused)
                 PlayerXL.accessibilityLabel = "Paused"
+                showStatus("Paused")
             }
         } else {
             DispatchQueue.main.async { [self] in
                 updatePlayPauseIcon(play: true)
                 Player.shared.new(.playing)
                 PlayerXL.accessibilityLabel = "Now Playing"
+                showStatus("Playing")
             }
         }
     }
@@ -614,7 +1003,7 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
             Player.shared.player.volume = value
         #else
             // your real device code
-            if !self.g.demomode && !isMacCatalystApp {
+            if !self.g.demomode && !self.isMacCatalystApp {
                 self.ap2volume?.setSoda(value)
             } else {
                 Player.shared.player.volume = value
@@ -704,6 +1093,12 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
     @objc func willEnterForeground() {
         updatePlayPauseIcon()
         startup()
+        
+        // Check connection when returning to foreground
+        if Player.shared.state == .playing {
+            showStatus("Checking connection...")
+            Player.shared.checkServerConnection()
+        }
     }
     
     func checkForNetworkError() {
@@ -734,5 +1129,17 @@ class PlayerViewController: UIViewController, AVRoutePickerViewDelegate  {
                 print("error")
             }}))
         self.present(alert, animated: true, completion: nil)
+    }
+    
+    @objc func handleServerConnectionLost() {
+        showStatus("Connection lost", duration: 5.0)
+    }
+    
+    @objc func handleServerLaunchFailed() {
+        showStatus("Server launch failed", duration: 5.0)
+    }
+    
+    @objc func handlePlayerItemStalled(_ notification: Notification) {
+        showStatus("Playback stalled, recovering...", duration: 3.0)
     }
 }

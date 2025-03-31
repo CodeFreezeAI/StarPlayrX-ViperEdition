@@ -62,9 +62,11 @@ open class HttpServerIO {
         stopListenerRestartTimer()
         
         listenerRestartTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
-        listenerRestartTimer?.schedule(deadline: .now() + 60, repeating: 60) // Check every 60 seconds
+        listenerRestartTimer?.schedule(deadline: .now() + 15, repeating: 15) // Check every 15 seconds instead of 60
         listenerRestartTimer?.setEventHandler { [weak self] in
             guard let self = self else { return }
+            
+            print("Heartbeat: Server state = \(self.state), connections: \(self.connections.count)")
             
             if self.state != .running {
                 print("Server not running, attempting to restart listener...")
@@ -74,6 +76,27 @@ open class HttpServerIO {
                     }
                 } catch {
                     print("Failed to restart listener: \(error)")
+                }
+            } else {
+                // Clean up stale connections
+                var staleConnections: [NWConnection] = []
+                for connection in self.connections {
+                    if case .cancelled = connection.state {
+                        staleConnections.append(connection)
+                    } else if case .failed = connection.state {
+                        staleConnections.append(connection)
+                    }
+                }
+                
+                if !staleConnections.isEmpty {
+                    print("Cleaning up \(staleConnections.count) stale connections")
+                    self.queue.async {
+                        for connection in staleConnections {
+                            if let index = self.connections.firstIndex(where: { $0 === connection }) {
+                                self.connections.remove(at: index)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -88,6 +111,14 @@ open class HttpServerIO {
     public func start(_ port: in_port_t, priority: DispatchQoS.QoSClass = .userInteractive) throws {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
+        
+        // Enable TCP keepalive to prevent connections from dropping during inactivity
+        if let tcpOptions = parameters.defaultProtocolStack.internetProtocol as? NWProtocolTCP.Options {
+            tcpOptions.enableKeepalive = true
+            tcpOptions.keepaliveIdle = 15  // Start sending keepalives after 15 seconds (instead of default 2 hours)
+            tcpOptions.keepaliveCount = 8  // Send up to 8 keepalive probes
+            tcpOptions.keepaliveInterval = 5  // Send keepalive every 5 seconds
+        }
         
         guard let port = NWEndpoint.Port(rawValue: port) else {
             throw SocketError.socketCreationFailed("Invalid port")
@@ -108,12 +139,12 @@ open class HttpServerIO {
                 print("Listener ready on port \(port)")
                 self.state = .running
                 self.startListenerRestartTimer()
-            case .failed(let error):
-                print("Listener failed with error: \(error)")
+            case .failed(_):
+                print("Connection failed")
                 self.stop()
                 
-                // Try to restart after error
-                DispatchQueue.global().asyncAfter(deadline: .now() + 5) { [weak self] in
+                // Try to restart after error more aggressively
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
                     guard let self = self else { return }
                     do {
                         try self.start(port.rawValue)
@@ -181,8 +212,9 @@ open class HttpServerIO {
             case .ready:
                 print("Connection ready")
             case .failed(let error):
-                // Check for ECONNRESET (Connection reset by peer - error code 54)
-                if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                // Use string interpolation of the error for safer error handling
+                let errorString = "\(error)"
+                if errorString.contains("reset") || errorString.contains("54") {
                     print("Connection reset by peer - client disconnected")
                 } else {
                     print("Connection failed: \(error)")
@@ -214,8 +246,9 @@ open class HttpServerIO {
             // Use a larger buffer size to accommodate JSON payloads
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1024 * 1024) { [weak self] content, contentContext, isComplete, error in
                 if let error = error {
-                    // Check for ECONNRESET (Connection reset by peer - error code 54)
-                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                    // Check for connection reset error
+                    let errorString = "\(error)"
+                    if errorString.contains("reset") || errorString.contains("54") {
                         print("Connection reset by peer while receiving - client disconnected")
                     } else {
                         print("Receive error: \(error)")
@@ -254,7 +287,8 @@ open class HttpServerIO {
                                 }
                             } catch {
                                 // Handle response errors
-                                if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                                let errorString = "\(error)"
+                                if errorString.contains("reset") || errorString.contains("54") {
                                     print("Connection reset by peer during response - client disconnected")
                                 } else {
                                     print("Response error: \(error)")
@@ -291,7 +325,7 @@ open class HttpServerIO {
             
             if keepAlive {
                 responseHeader.append("Connection: keep-alive\r\n")
-                responseHeader.append("Keep-Alive: timeout=60\r\n") // Add timeout directive
+                responseHeader.append("Keep-Alive: timeout=30, max=1000\r\n") // Shorter timeout, higher max
             } else {
                 responseHeader.append("Connection: close\r\n")
             }
@@ -302,6 +336,8 @@ open class HttpServerIO {
                 responseHeader.append("Cache-Control: no-cache, no-store, must-revalidate\r\n")
                 responseHeader.append("Pragma: no-cache\r\n")
                 responseHeader.append("Expires: 0\r\n")
+                // Allow cross-origin requests for better compatibility
+                responseHeader.append("Access-Control-Allow-Origin: *\r\n")
             }
             
             for (name, value) in response.headers() {
@@ -316,7 +352,8 @@ open class HttpServerIO {
             // Send headers
             connection.send(content: responseHeader.data(using: .utf8)!, completion: .contentProcessed { error in
                 if let error = error {
-                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                    let errorString = "\(error)"
+                    if errorString.contains("reset") || errorString.contains("54") {
                         print("Connection reset by peer while sending headers - client disconnected")
                     } else {
                         print("Header write error: \(error)")
@@ -372,7 +409,8 @@ open class HttpServerIO {
                 
                 connection.send(content: Data(), completion: NWConnection.SendCompletion.contentProcessed { error in
                     if let error = error {
-                        if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                        let errorString = "\(error)"
+                        if errorString.contains("reset") || errorString.contains("54") {
                             print("Connection reset by peer during flush - client disconnected")
                         } else {
                             print("Flush error: \(error)")
@@ -416,8 +454,9 @@ open class HttpServerIO {
             
             connection.send(content: Data(data), completion: .contentProcessed { error in
                 if let error = error {
-                    // Check for specific error: Connection reset by peer (54)
-                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                    // Check for connection reset based on error description
+                    let errorString = "\(error)"
+                    if errorString.contains("reset") || errorString.contains("54") {
                         print("Connection reset by peer - client likely disconnected")
                     } else {
                         print("Write error: \(error)")
@@ -436,8 +475,9 @@ open class HttpServerIO {
             
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
-                    // Check for specific error: Connection reset by peer (54)
-                    if let posixError = error as? POSIXError, posixError.code == .ECONNRESET {
+                    // Check for connection reset based on error description
+                    let errorString = "\(error)"
+                    if errorString.contains("reset") || errorString.contains("54") {
                         print("Connection reset by peer - client likely disconnected")
                     } else {
                         print("Write error: \(error)")
